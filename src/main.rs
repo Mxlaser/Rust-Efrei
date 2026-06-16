@@ -1,123 +1,220 @@
-//! Démonstration de la partie « Carte & structures de données » (Personne 1).
+//! Interface terminal Ratatui — Personne 4.
 //!
-//! Ce binaire n'utilise **pas** encore Ratatui : il sert uniquement à valider
-//! visuellement la génération de carte en l'affichant en ASCII dans le
-//! terminal, avant que l'équipe n'intègre l'UI (Personne 4) et la concurrence
-//! (Personne 3).
+//! Assemble tout le projet : lance la simulation (Personne 3) dans un thread
+//! séparé, reçoit les positions des robots via un channel `mpsc`, lit la carte
+//! et les ressources via les handles partagés, et dessine le tout en temps réel.
 //!
-//! Lancement :
-//!   cargo run                 # carte par défaut
-//!   cargo run -- 123          # carte avec la graine 123
+//! Touche : n'importe quelle touche quitte la simulation.
 
+use std::collections::HashMap;
+use std::io::{self, Stdout};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use crossterm::event::{self, Event};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::{Frame, Terminal};
+
+use resource_collection_sim::comm::RobotSnapshot;
 use resource_collection_sim::map::{self, MapConfig};
 use resource_collection_sim::sim::Simulation;
 use resource_collection_sim::types::{Position, ResourceKind, Tile, World};
 
-fn main() {
-    // Graine optionnelle passée en argument de ligne de commande.
+/// Nombre de collecteurs lancés par la simulation.
+const N_COLLECTORS: usize = 3;
+/// Nombre maximum de ticks de simulation.
+const MAX_TICKS: usize = 500_000;
+
+fn main() -> io::Result<()> {
+    // --- 1. Générer le monde et préparer la simulation ---------------------
+    // Graine optionnelle passée en argument : `cargo run -- 123`.
     let seed = std::env::args()
         .nth(1)
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(MapConfig::default().seed);
+        .unwrap_or(42);
 
-    let config = MapConfig {
+    let world = map::generate(MapConfig {
         seed,
         ..MapConfig::default()
-    };
-    let world = map::generate(config);
-
-    println!("=== Simulation de collecte de ressources — aperçu de la carte ===");
-    println!(
-        "Taille : {}x{}  |  graine : {}",
-        world.width, world.height, seed
-    );
-    println!();
-
-    render_ascii(&world);
-    print_summary(&world);
-    run_simulation(config);
-}
-
-fn run_simulation(config: MapConfig) {
-    println!();
-    println!("=== Simulation concurrente (2 éclaireurs + 3 collecteurs) ===");
-
-    let world = map::generate(config);
-    let total: u32 = world.resources.values().map(|r| r.quantity).sum();
+    });
 
     let sim = Simulation::new(world);
-    let results = sim.run_scouts_and_collectors(2, 3, 42, 500_000);
-    let collected: u32 = results.iter().sum();
 
-    for (i, &units) in results.iter().enumerate() {
-        println!("  Collecteur #{i} : {units} unités déposées");
-    }
-    println!("  Total collecté : {collected} / {total} unités");
+    // Les éclaireurs ne sont pas lancés par `run_sending` : on peuple donc la
+    // base de connaissances directement, sinon les collecteurs n'ont aucune
+    // ressource connue à viser et la simulation s'arrête aussitôt.
+    sim.discover_all();
+
+    // Handles partagés pour lire le décor (terrain + ressources) au rendu.
+    let world_handle = sim.world_handle();
+
+    // --- 2. Lancer la simulation dans un thread séparé ---------------------
+    let (tx, rx) = mpsc::channel::<RobotSnapshot>();
+    let sim_thread = thread::spawn(move || {
+        sim.run_sending(N_COLLECTORS, MAX_TICKS, Some(tx));
+    });
+
+    // --- 3. Préparer le terminal Ratatui -----------------------------------
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // --- 4. Boucle de rendu ------------------------------------------------
+    let result = run_app(&mut terminal, &world_handle, rx);
+
+    // --- 5. Restaurer le terminal quoi qu'il arrive ------------------------
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    // On laisse le thread de simulation se terminer en arrière-plan.
+    drop(sim_thread);
+
+    result
 }
 
-/// Affiche la carte en ASCII, en respectant les symboles du cahier des charges.
-///
-/// Légende : `O` obstacle, `E` énergie, `C` cristal, `#` base, `.` case libre.
-fn render_ascii(world: &World) {
+/// Boucle principale : draine le channel, met à jour l'état, dessine, lit le clavier.
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    world_handle: &Arc<Mutex<World>>,
+    rx: mpsc::Receiver<RobotSnapshot>,
+) -> io::Result<()> {
+    // Dernier snapshot connu par robot (indexé par id).
+    let mut robots: HashMap<usize, RobotSnapshot> = HashMap::new();
+
+    loop {
+        // Draine tous les snapshots disponibles ce tour-ci (garde le plus récent).
+        while let Ok(snap) = rx.try_recv() {
+            robots.insert(snap.id, snap);
+        }
+
+        // Total déposé = somme des `deposited` de chaque robot.
+        let total_deposited: u32 = robots.values().map(|r| r.deposited).sum();
+
+        // Snapshot du monde pour ce rendu (clone court pour relâcher le lock vite).
+        let world = world_handle.lock().unwrap().clone();
+
+        terminal.draw(|f| ui(f, &world, &robots, total_deposited))?;
+
+        // N'importe quelle touche quitte.
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(_) = event::read()? {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Dessine une frame : la carte à gauche, les infos à droite.
+fn ui(f: &mut Frame, world: &World, robots: &HashMap<usize, RobotSnapshot>, total: u32) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(28)])
+        .split(f.area());
+
+    draw_map(f, chunks[0], world, robots);
+    draw_sidebar(f, chunks[1], world, robots, total);
+}
+
+/// Rendu de la grille avec le codage couleur exact demandé par le sujet.
+fn draw_map(f: &mut Frame, area: Rect, world: &World, robots: &HashMap<usize, RobotSnapshot>) {
+    // Positions occupées par un robot collecteur (affiché 'o' magenta).
+    let robot_cells: HashMap<Position, ()> =
+        robots.values().map(|r| (r.pos, ())).collect();
+
+    let mut lines: Vec<Line> = Vec::with_capacity(world.height);
+
     for y in 0..world.height {
-        let mut line = String::with_capacity(world.width);
+        let mut spans: Vec<Span> = Vec::with_capacity(world.width);
         for x in 0..world.width {
             let pos = Position::new(x, y);
-            let ch = symbol_at(world, pos);
-            line.push(ch);
+
+            // Priorité d'affichage : robot > ressource > terrain.
+            let (ch, color) = if robot_cells.contains_key(&pos) {
+                ('o', Color::Magenta) // Collecteur
+            } else if let Some(res) = world.resource_at(pos) {
+                match res.kind {
+                    ResourceKind::Energy => ('E', Color::Green),
+                    ResourceKind::Crystal => ('C', Color::LightMagenta),
+                }
+            } else {
+                match world.tile(pos) {
+                    Some(Tile::Obstacle) => ('O', Color::LightCyan),
+                    Some(Tile::Base) => ('#', Color::LightGreen),
+                    Some(Tile::Empty) => ('.', Color::DarkGray),
+                    None => (' ', Color::Reset),
+                }
+            };
+
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
-        println!("{line}");
+        lines.push(Line::from(spans));
     }
+
+    let map_widget = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Carte "));
+    f.render_widget(map_widget, area);
 }
 
-/// Détermine le caractère à afficher pour une case (ressource prioritaire sur
-/// le terrain libre).
-fn symbol_at(world: &World, pos: Position) -> char {
-    if let Some(resource) = world.resource_at(pos) {
-        return resource.kind.symbol();
-    }
-    match world.tile(pos) {
-        Some(Tile::Obstacle) => 'O',
-        Some(Tile::Base) => '#',
-        Some(Tile::Empty) => '.',
-        None => ' ',
-    }
-}
+/// Panneau latéral : compteur de ressources et état des robots.
+fn draw_sidebar(
+    f: &mut Frame,
+    area: Rect,
+    world: &World,
+    robots: &HashMap<usize, RobotSnapshot>,
+    total: u32,
+) {
+    // Reste à collecter sur la carte (vérité terrain, pour information).
+    let remaining: u32 = world.resources.values().map(|r| r.quantity).sum();
 
-/// Affiche un récapitulatif chiffré de la carte générée.
-fn print_summary(world: &World) {
-    let total_tiles = world.width * world.height;
-    let obstacles = world
-        .tiles()
-        .iter()
-        .filter(|t| matches!(t, Tile::Obstacle))
-        .count();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Collecté à la base",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  {total} unités"),
+            Style::default().fg(Color::LightGreen),
+        )),
+        Line::from(""),
+        Line::from(format!("Reste sur carte : {remaining}")),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Robots",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
 
-    let mut energy_sites = 0;
-    let mut crystal_sites = 0;
-    let mut energy_units = 0u32;
-    let mut crystal_units = 0u32;
-    for resource in world.resources.values() {
-        match resource.kind {
-            ResourceKind::Energy => {
-                energy_sites += 1;
-                energy_units += resource.quantity;
-            }
-            ResourceKind::Crystal => {
-                crystal_sites += 1;
-                crystal_units += resource.quantity;
-            }
-        }
+    let mut ids: Vec<&usize> = robots.keys().collect();
+    ids.sort();
+    for id in ids {
+        let r = &robots[id];
+        lines.push(Line::from(format!(
+            "  #{} {} ({},{}) d:{}",
+            r.id, r.state_label, r.pos.x, r.pos.y, r.deposited
+        )));
     }
 
-    println!();
-    println!("--- Récapitulatif ---");
-    println!("Base                : {:?}", world.base);
-    println!(
-        "Obstacles           : {} ({:.1}% de la carte)",
-        obstacles,
-        100.0 * obstacles as f64 / total_tiles as f64
-    );
-    println!("Sources d'énergie   : {energy_sites} gisements, {energy_units} unités au total");
-    println!("Gisements cristaux  : {crystal_sites} gisements, {crystal_units} unités au total");
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Touche = quitter",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let sidebar = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Infos "));
+    f.render_widget(sidebar, area);
 }
