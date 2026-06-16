@@ -10,6 +10,7 @@
 //!   cargo run -- 123          # carte avec la graine 123
 
 use resource_collection_sim::map::{self, MapConfig};
+use resource_collection_sim::sim::Simulation;
 use resource_collection_sim::types::{Position, ResourceKind, Tile, World};
 
 fn main() {
@@ -34,6 +35,26 @@ fn main() {
 
     render_ascii(&world);
     print_summary(&world);
+    run_simulation(config);
+}
+
+fn run_simulation(config: MapConfig) {
+    println!();
+    println!("=== Simulation concurrente (3 collecteurs) ===");
+
+    let world = map::generate(config);
+    let total: u32 = world.resources.values().map(|r| r.quantity).sum();
+
+    let sim = Simulation::new(world);
+    sim.discover_all(); // en attendant les éclaireurs (P2)
+
+    let results = sim.run(3, 200_000);
+    let collected: u32 = results.iter().sum();
+
+    for (i, &units) in results.iter().enumerate() {
+        println!("  Collecteur #{i} : {units} unités déposées");
+    }
+    println!("  Total collecté : {collected} / {total} unités");
 }
 
 /// Affiche la carte en ASCII, en respectant les symboles du cahier des charges.

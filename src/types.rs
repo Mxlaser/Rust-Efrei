@@ -142,6 +142,44 @@ impl Tile {
     }
 }
 
+/// Ce que les robots ont découvert collectivement — le seul état visible par
+/// les collecteurs et les éclaireurs. Distinct de [`World::resources`] qui est
+/// la vérité-terrain, invisible aux robots.
+///
+/// En phase concurrente (Personne 3), cette structure est enveloppée dans un
+/// `Arc<Mutex<KnowledgeBase>>` partagé entre tous les threads de robots.
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeBase {
+    known_resources: HashMap<Position, Resource>,
+}
+
+impl KnowledgeBase {
+    pub fn new() -> Self {
+        KnowledgeBase::default()
+    }
+
+    /// Enregistre une ressource découverte par un éclaireur.
+    /// Met à jour la quantité si la position était déjà connue.
+    pub fn report_resource(&mut self, pos: Position, resource: Resource) {
+        self.known_resources.insert(pos, resource);
+    }
+
+    /// Lecture des ressources connues (pour le ciblage des collecteurs).
+    pub fn known_resources(&self) -> &HashMap<Position, Resource> {
+        &self.known_resources
+    }
+
+    /// Retire une entrée quand le gisement est épuisé ou confirmé vide.
+    pub fn remove(&mut self, pos: &Position) {
+        self.known_resources.remove(pos);
+    }
+
+    /// Vrai si aucune ressource n'est encore connue.
+    pub fn is_empty(&self) -> bool {
+        self.known_resources.is_empty()
+    }
+}
+
 /// Le monde de la simulation : la carte et tout ce qu'elle contient.
 ///
 /// C'est la structure centrale partagée. En phase concurrente (Personne 3),
