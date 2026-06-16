@@ -11,4 +11,5 @@
 //!   * `ui`      — rendu Ratatui (Personne 4, à venir).
 
 pub mod map;
+pub mod robots;
 pub mod types;
