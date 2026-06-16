@@ -1,19 +1,29 @@
 //! Couche de concurrence — Personne 3.
 //!
-//! [`Simulation`] enveloppe le monde et la base de connaissance dans des
-//! `Arc<Mutex<>>` puis lance chaque collecteur dans son propre thread.
+//! [`Simulation`] enveloppe le monde et la KB dans des `Arc<Mutex<>>` puis
+//! applique les décisions de P2 dans des threads dédiés.
+//!
+//! ## Contrat d'application des actions (wiring P2 → P3)
+//!
+//! | Action             | Ce que P3 fait                                               |
+//! |--------------------|--------------------------------------------------------------|
+//! | `MoveTo(p)`        | `state.pos = p`                                              |
+//! | `Collect(p)`       | `take_one()` sur world ; `carrying += 1` ; retire KB si épuisé |
+//! | `Unload`           | `deposited += carrying ; carrying = 0`                       |
+//! | `Report(p, res)`   | `kb.report_resource(p, res)`                                 |
+//! | `Idle`             | rien                                                         |
 //!
 //! ## Ordre d'acquisition des verrous
 //!
-//! Toujours : `world` en premier, `kb` en second.
-//! Respecter cet ordre dans tout le code évite les interblocages (deadlocks).
+//! Toujours **`world` en premier, `kb` en second** — dans tout le code.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::comm::RobotSnapshot;
-use crate::robots::{Collector, CollectorState};
+use crate::robots::{collector_decide, scout_decide, Action, CollectorState, ScoutState};
 use crate::types::{KnowledgeBase, World};
 
 // ---------------------------------------------------------------------------
@@ -38,22 +48,13 @@ impl Simulation {
         Arc::clone(&self.world)
     }
 
-    /// Handle clonable vers la KnowledgeBase — à passer à P2 pour les éclaireurs.
-    ///
-    /// ## Usage (P2)
-    /// ```ignore
-    /// let kb = sim.kb_handle();
-    /// // dans le thread éclaireur :
-    /// kb.lock().unwrap().report_resource(pos, resource);
-    /// ```
+    /// Handle clonable vers la KnowledgeBase — à passer à P2 pour les scouts.
     pub fn kb_handle(&self) -> Arc<Mutex<KnowledgeBase>> {
         Arc::clone(&self.kb)
     }
 
     /// Pré-remplit la KB avec toutes les ressources du monde.
-    ///
-    /// Dans la simulation complète c'est le rôle des éclaireurs (P2).
-    /// Cette méthode sert aux tests et à la démo sans éclaireurs.
+    /// Simule le fait que les éclaireurs ont tout découvert — utile pour les tests.
     pub fn discover_all(&self) {
         let world = self.world.lock().unwrap();
         let mut kb = self.kb.lock().unwrap();
@@ -62,41 +63,108 @@ impl Simulation {
         }
     }
 
-    /// Lance `n_collectors` robots collecteurs en parallèle.
+    // -----------------------------------------------------------------------
+    // Simulation complète : scouts + collecteurs
+    // -----------------------------------------------------------------------
+
+    /// Lance `n_scouts` éclaireurs et `n_collectors` collecteurs en parallèle.
     ///
-    /// Chaque robot tourne dans son propre thread jusqu'à ce que la KB soit
-    /// vide et qu'il soit `Idle`, ou jusqu'à atteindre `max_ticks`.
+    /// Chaque scout reçoit la graine `base_seed + index` pour que leurs
+    /// marches aléatoires soient indépendantes.
     ///
-    /// Retourne le vecteur des unités déposées à la base par chaque robot.
-    pub fn run(&self, n_collectors: usize, max_ticks: usize) -> Vec<u32> {
+    /// Retourne le vecteur des unités déposées à la base par chaque collecteur.
+    pub fn run_scouts_and_collectors(
+        &self,
+        n_scouts: usize,
+        n_collectors: usize,
+        base_seed: u64,
+        max_ticks: usize,
+    ) -> Vec<u32> {
         let base = self.world.lock().unwrap().base;
 
-        let handles: Vec<_> = (0..n_collectors)
-            .map(|id| {
+        // Compteur décrémenté par chaque scout à sa fin — les collecteurs
+        // n'ont le droit de s'arrêter que quand il atteint zéro.
+        let scouts_remaining = Arc::new(AtomicUsize::new(n_scouts));
+
+        // --- Threads éclaireurs ---
+        let scout_handles: Vec<_> = (0..n_scouts)
+            .map(|i| {
                 let world = Arc::clone(&self.world);
                 let kb = Arc::clone(&self.kb);
+                let scouts_remaining = Arc::clone(&scouts_remaining);
+                let seed = base_seed + i as u64;
 
                 thread::spawn(move || {
-                    let mut collector = Collector::new(id, base);
+                    let mut state = ScoutState::new(base, seed);
 
                     for _ in 0..max_ticks {
-                        // Ordre strict : world d'abord, kb ensuite.
-                        let mut world = world.lock().unwrap();
-                        let mut kb = kb.lock().unwrap();
-
-                        if kb.is_empty() && matches!(collector.state, CollectorState::Idle) {
-                            break;
+                        let action = {
+                            let world = world.lock().unwrap();
+                            scout_decide(&mut state, &world)
+                        };
+                        match action {
+                            Action::MoveTo(p) => state.pos = p,
+                            Action::Report(p, res) => {
+                                kb.lock().unwrap().report_resource(p, res);
+                            }
+                            Action::Idle => {}
+                            _ => {}
                         }
-
-                        collector.step(&mut world, &mut kb);
                     }
-
-                    collector.deposited
+                    scouts_remaining.fetch_sub(1, Ordering::Relaxed);
                 })
             })
             .collect();
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        // --- Threads collecteurs ---
+        let collector_handles: Vec<_> = (0..n_collectors)
+            .map(|_| {
+                let world = Arc::clone(&self.world);
+                let kb = Arc::clone(&self.kb);
+                let scouts_remaining = Arc::clone(&scouts_remaining);
+
+                thread::spawn(move || {
+                    let mut state = CollectorState::new(base, 10);
+                    let mut deposited = 0u32;
+
+                    for _ in 0..max_ticks {
+                        let known = kb.lock().unwrap().known_resources().clone();
+
+                        let action = {
+                            let world = world.lock().unwrap();
+                            collector_decide(&mut state, &world, &known)
+                        };
+
+                        apply_collector_action(&mut state, &mut deposited, action, &world, &kb);
+
+                        // N'arrête que quand tous les scouts sont finis ET KB vide.
+                        if matches!(action, Action::Idle) && state.carrying == 0
+                            && scouts_remaining.load(Ordering::Relaxed) == 0
+                            && kb.lock().unwrap().is_empty()
+                        {
+                            break;
+                        }
+                    }
+
+                    deposited
+                })
+            })
+            .collect();
+
+        for h in scout_handles {
+            h.join().unwrap();
+        }
+        collector_handles.into_iter().map(|h| h.join().unwrap()).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Collecteurs seuls (KB pré-remplie via discover_all)
+    // -----------------------------------------------------------------------
+
+    /// Lance `n_collectors` collecteurs avec la KB déjà remplie.
+    /// Utile pour les tests et les démos sans éclaireurs.
+    pub fn run(&self, n_collectors: usize, max_ticks: usize) -> Vec<u32> {
+        self.run_sending(n_collectors, max_ticks, None)
     }
 
     /// Variante de [`run`] qui envoie un [`RobotSnapshot`] après chaque tick.
@@ -104,18 +172,11 @@ impl Simulation {
     /// P4 passe un `Sender` issu d'un `mpsc::channel()` et lit les snapshots
     /// dans sa boucle de rendu avec `rx.try_recv()`.
     ///
-    /// Les erreurs d'envoi sont silencieuses : si P4 ferme le `Receiver`
-    /// avant la fin de la simulation, les robots continuent simplement sans
-    /// envoyer.
-    ///
     /// ## Usage (P4)
     /// ```ignore
     /// let (tx, rx) = std::sync::mpsc::channel::<RobotSnapshot>();
-    /// let sim_handle = {
-    ///     let tx = tx.clone();
-    ///     std::thread::spawn(move || sim.run_sending(3, 200_000, tx))
-    /// };
-    /// // boucle de rendu Ratatui :
+    /// std::thread::spawn(move || sim.run_sending(3, 200_000, Some(tx)));
+    /// // boucle Ratatui :
     /// while let Ok(snap) = rx.try_recv() {
     ///     robot_states.insert(snap.id, snap);
     /// }
@@ -124,7 +185,7 @@ impl Simulation {
         &self,
         n_collectors: usize,
         max_ticks: usize,
-        tx: Sender<RobotSnapshot>,
+        tx: Option<Sender<RobotSnapshot>>,
     ) -> Vec<u32> {
         let base = self.world.lock().unwrap().base;
 
@@ -135,32 +196,97 @@ impl Simulation {
                 let tx = tx.clone();
 
                 thread::spawn(move || {
-                    let mut collector = Collector::new(id, base);
+                    let mut state = CollectorState::new(base, 10);
+                    let mut deposited = 0u32;
 
                     for _ in 0..max_ticks {
-                        let mut world = world.lock().unwrap();
-                        let mut kb = kb.lock().unwrap();
+                        let known = kb.lock().unwrap().known_resources().clone();
 
-                        if kb.is_empty() && matches!(collector.state, CollectorState::Idle) {
-                            break;
+                        let action = {
+                            let world = world.lock().unwrap();
+                            collector_decide(&mut state, &world, &known)
+                        };
+
+                        apply_collector_action(&mut state, &mut deposited, action, &world, &kb);
+
+                        if let Some(ref tx) = tx {
+                            let _ = tx.send(RobotSnapshot {
+                                id,
+                                pos: state.pos,
+                                state_label: action_label(action),
+                                deposited,
+                            });
                         }
 
-                        collector.step(&mut world, &mut kb);
-
-                        let _ = tx.send(RobotSnapshot {
-                            id: collector.id,
-                            pos: collector.pos,
-                            state_label: collector.state.label(),
-                            deposited: collector.deposited,
-                        });
+                        if matches!(action, Action::Idle) && state.carrying == 0 {
+                            if kb.lock().unwrap().is_empty() {
+                                break;
+                            }
+                        }
                     }
 
-                    collector.deposited
+                    deposited
                 })
             })
             .collect();
 
         handles.into_iter().map(|h| h.join().unwrap()).collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Applique une action de collecteur : mute state, world, kb selon le contrat.
+fn apply_collector_action(
+    state: &mut CollectorState,
+    deposited: &mut u32,
+    action: Action,
+    world: &Arc<Mutex<World>>,
+    kb: &Arc<Mutex<KnowledgeBase>>,
+) {
+    match action {
+        Action::MoveTo(p) => state.pos = p,
+
+        Action::Collect(p) => {
+            let mut world = world.lock().unwrap();
+            // Extraire le résultat avant tout `remove` pour satisfaire le borrow checker.
+            let (took, now_depleted) = match world.resources.get_mut(&p) {
+                Some(res) => {
+                    let took = res.take_one();
+                    let dep = res.is_depleted();
+                    (took, dep)
+                }
+                None => (false, true), // course : déjà épuisé par un autre robot
+            };
+            if took {
+                state.carrying += 1;
+            }
+            if now_depleted {
+                world.resources.remove(&p);
+                drop(world); // libère world AVANT de prendre kb
+                kb.lock().unwrap().remove(&p);
+            }
+        }
+
+        Action::Unload => {
+            *deposited += state.carrying;
+            state.carrying = 0;
+        }
+
+        Action::Idle | Action::Report(..) => {}
+    }
+}
+
+/// Étiquette d'une action pour les snapshots de P4.
+fn action_label(action: Action) -> &'static str {
+    match action {
+        Action::MoveTo(_) => "Moving",
+        Action::Collect(_) => "Collecting",
+        Action::Unload => "Unloading",
+        Action::Report(..) => "Reporting",
+        Action::Idle => "Idle",
     }
 }
 
@@ -173,9 +299,8 @@ mod tests {
     use super::*;
     use crate::types::{Position, Resource, ResourceKind, World};
 
-    /// Monde minimal : pas d'obstacles, base au centre, ressources à la main.
     fn small_world(resources: &[(Position, ResourceKind, u32)]) -> World {
-        let mut world = World::new(11, 11); // base en (5,5)
+        let mut world = World::new(11, 11); // base en (5, 5)
         for &(pos, kind, qty) in resources {
             world.resources.insert(pos, Resource::new(kind, qty));
         }
@@ -184,7 +309,7 @@ mod tests {
 
     #[test]
     fn un_collecteur_ramasse_une_ressource() {
-        let pos = Position::new(5, 0); // 5 cases au-dessus de la base
+        let pos = Position::new(5, 0);
         let world = small_world(&[(pos, ResourceKind::Energy, 1)]);
         let sim = Simulation::new(world);
         sim.discover_all();
@@ -217,8 +342,7 @@ mod tests {
         sim.discover_all();
 
         let results = sim.run(2, 1000);
-        let collected: u32 = results.iter().sum();
-        assert_eq!(collected, total, "Toutes les unités doivent être déposées");
+        assert_eq!(results.iter().sum::<u32>(), total);
     }
 
     #[test]
@@ -228,14 +352,12 @@ mod tests {
             (Position::new(10, 0), ResourceKind::Crystal, 3),
             (Position::new(0, 10), ResourceKind::Energy, 3),
         ];
-        let total: u32 = 9;
         let world = small_world(&resources);
         let sim = Simulation::new(world);
         sim.discover_all();
 
         let results = sim.run(3, 2000);
-        let collected: u32 = results.iter().sum();
-        assert_eq!(collected, total);
+        assert_eq!(results.iter().sum::<u32>(), 9u32);
     }
 
     #[test]
@@ -246,15 +368,13 @@ mod tests {
         sim.discover_all();
         sim.run(1, 1000);
 
-        let kb = sim.kb.lock().unwrap();
-        assert!(kb.is_empty(), "La KB doit être vide quand tout est collecté");
+        assert!(sim.kb.lock().unwrap().is_empty());
     }
 
     #[test]
     fn run_sending_emet_des_snapshots() {
+        use std::collections::HashMap as HMap;
         use std::sync::mpsc;
-        use crate::comm::RobotSnapshot;
-        use std::collections::HashMap;
 
         let pos = Position::new(5, 0);
         let world = small_world(&[(pos, ResourceKind::Energy, 2)]);
@@ -262,16 +382,26 @@ mod tests {
         sim.discover_all();
 
         let (tx, rx) = mpsc::channel::<RobotSnapshot>();
-        sim.run_sending(1, 1000, tx);
+        sim.run_sending(1, 1000, Some(tx));
 
-        // Collecte tous les snapshots et garde le dernier par robot.
-        let mut latest: HashMap<usize, RobotSnapshot> = HashMap::new();
+        let mut latest: HMap<usize, RobotSnapshot> = HMap::new();
         while let Ok(snap) = rx.try_recv() {
             latest.insert(snap.id, snap);
         }
-
-        assert!(!latest.is_empty(), "Au moins un snapshot doit avoir été reçu");
+        assert!(!latest.is_empty());
         assert_eq!(latest[&0].deposited, 2);
+    }
+
+    #[test]
+    fn scouts_decouvrent_et_collecteurs_ramassent() {
+        // Carte 11x11, 1 ressource — les scouts la découvrent, les collecteurs ramassent.
+        let pos = Position::new(0, 0);
+        let world = small_world(&[(pos, ResourceKind::Energy, 1)]);
+        let sim = Simulation::new(world);
+        // Pas de discover_all() : les scouts doivent trouver la ressource.
+
+        let results = sim.run_scouts_and_collectors(2, 1, 42, 50_000);
+        assert_eq!(results.iter().sum::<u32>(), 1);
     }
 
     #[test]
@@ -280,10 +410,8 @@ mod tests {
         let sim = Simulation::new(world);
         let kb = sim.kb_handle();
 
-        // Simule P2 qui rapporte une ressource depuis un autre thread.
         let kb2 = Arc::clone(&kb);
         thread::spawn(move || {
-            use crate::types::{Resource, ResourceKind};
             kb2.lock()
                 .unwrap()
                 .report_resource(Position::new(1, 1), Resource::new(ResourceKind::Energy, 5));

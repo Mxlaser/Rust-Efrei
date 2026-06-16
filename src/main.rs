@@ -40,15 +40,13 @@ fn main() {
 
 fn run_simulation(config: MapConfig) {
     println!();
-    println!("=== Simulation concurrente (3 collecteurs) ===");
+    println!("=== Simulation concurrente (2 éclaireurs + 3 collecteurs) ===");
 
     let world = map::generate(config);
     let total: u32 = world.resources.values().map(|r| r.quantity).sum();
 
     let sim = Simulation::new(world);
-    sim.discover_all(); // en attendant les éclaireurs (P2)
-
-    let results = sim.run(3, 200_000);
+    let results = sim.run_scouts_and_collectors(2, 3, 42, 500_000);
     let collected: u32 = results.iter().sum();
 
     for (i, &units) in results.iter().enumerate() {

@@ -1,331 +1,605 @@
-//! Robots collecteurs — Personne 3.
+//! Comportements des robots : logique de décision **pure**.
 //!
-//! Chaque [`Collector`] est un thread indépendant qui lit la [`KnowledgeBase`]
-//! (ressources découvertes par les éclaireurs) et collecte des unités, une par
-//! tick, avant de revenir à la base.
+//! Ce module appartient à la **Personne 2** (comportements). Sa règle d'or :
+//! une fonction `*_decide` est de la **logique pure**. Elle reçoit l'état du
+//! robot (mutable, p. ex. pour faire avancer son générateur aléatoire) et une
+//! **vue en lecture** du monde ([`World`]), puis renvoie une **intention**
+//! ([`Action`]). Elle ne crée *aucun* thread, ne prend *aucun* lock, n'envoie
+//! sur *aucun* channel, ne fait *aucun* `sleep` et ne mute *jamais* le monde.
 //!
-//! En phase concurrente le collecteur reçoit un `Arc<Mutex<KnowledgeBase>>`
-//! et un `Arc<Mutex<World>>`. Ici on expose la logique pure (sans threads)
-//! pour pouvoir la tester unitairement.
+//! C'est la **Personne 3** (threads & communication) qui exécutera ces
+//! décisions dans des threads et **appliquera** réellement les [`Action`] sur
+//! le monde partagé. Le contrat est donc strict : *décider* (P2) et *appliquer*
+//! (P3) sont deux étapes séparées.
 
-use std::collections::{HashMap, VecDeque};
+use crate::types::{Position, Resource, World};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::types::{KnowledgeBase, Position, World};
-
-// ---------------------------------------------------------------------------
-// Machine à états
-// ---------------------------------------------------------------------------
-
-/// État interne d'un robot collecteur.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CollectorState {
-    /// Aucune cible — le robot attend une ressource dans la KnowledgeBase.
+/// Intention produite par un robot pour un tick de simulation.
+///
+/// C'est le **vocabulaire partagé** entre la décision (Personne 2) et son
+/// application (Personne 3). Il est volontairement **complet et figé** : il
+/// couvre les besoins de l'éclaireur *et* du collecteur, même si certaines
+/// variantes ne seront branchées qu'au Sprint 2. P3 fera un `match` exhaustif
+/// dessus pour faire évoluer le monde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Se déplacer vers une case **adjacente** et traversable.
+    MoveTo(Position),
+    /// Collecteur : ramasser une unité de ressource sur la case courante.
+    Collect(Position),
+    /// Collecteur : décharger sa cargaison une fois revenu à la base.
+    Unload,
+    /// Éclaireur : signaler une ressource observée à la position donnée.
+    Report(Position, Resource),
+    /// Rien à faire ce tick (p. ex. robot encerclé d'obstacles).
     Idle,
-    /// Le robot suit le chemin `path` vers la ressource en `target`.
-    MovingToTarget { target: Position, path: VecDeque<Position> },
-    /// Le robot est sur la case ressource et collecte une unité par tick.
-    Collecting { target: Position },
-    /// Le robot rentre à la base avec `units` unités collectées.
-    ReturningToBase { units: u32, path: VecDeque<Position> },
+}
+
+/// État propre à un robot **éclaireur**.
+///
+/// L'éclaireur explore la carte au hasard et signale les ressources qu'il
+/// rencontre. Il embarque son **propre** générateur aléatoire ([`StdRng`])
+/// initialisé par une graine, ce qui rend ses décisions **déterministes** et
+/// donc testables.
+pub struct ScoutState {
+    /// Position courante du robot sur la grille.
+    pub pos: Position,
+    /// Générateur aléatoire personnel (choix de la direction d'exploration).
+    rng: StdRng,
+}
+
+impl ScoutState {
+    /// Crée un éclaireur à la position `start`, avec un PRNG initialisé par
+    /// `seed`. À graine égale, la suite des décisions est reproductible.
+    pub fn new(start: Position, seed: u64) -> Self {
+        ScoutState {
+            pos: start,
+            rng: StdRng::seed_from_u64(seed),
+        }
+    }
+}
+
+/// Décide de l'**intention** d'un éclaireur pour le tick courant.
+///
+/// Logique pure : aucune mutation du monde, aucun effet de bord hormis
+/// l'avancée du PRNG porté par `state`.
+///
+/// Priorités :
+/// 1. Si une ressource se trouve sur la case courante, la signaler via
+///    [`Action::Report`].
+/// 2. Sinon, choisir au hasard une case **traversable et adjacente** et
+///    renvoyer [`Action::MoveTo`].
+/// 3. Si aucun voisin n'est traversable (robot encerclé), renvoyer
+///    [`Action::Idle`].
+///
+/// Cette fonction **ne déplace pas** le robot : elle renvoie seulement
+/// l'intention. C'est P3 qui, en appliquant l'`Action`, mettra à jour la
+/// position (cf. le helper de test [`apply`]).
+pub fn scout_decide(state: &mut ScoutState, world: &World) -> Action {
+    if let Some(&resource) = world.resource_at(state.pos) {
+        return Action::Report(state.pos, resource);
+    }
+
+    let neighbors = world.walkable_neighbors(state.pos);
+    if neighbors.is_empty() {
+        return Action::Idle;
+    }
+
+    let choice = state.rng.gen_range(0..neighbors.len());
+    Action::MoveTo(neighbors[choice])
+}
+
+/// État propre à un robot **collecteur**.
+///
+/// Le collecteur se rend sur les gisements **connus** (signalés par les
+/// éclaireurs, transmis par P3 en données brutes), y ramasse des ressources une
+/// unité par tick jusqu'à atteindre sa [`capacity`](CollectorState::capacity),
+/// puis rentre décharger à la base.
+///
+/// Contrat de mutation : seul `collector_decide` écrit `target` (planification
+/// interne). Les champs `pos` et `carrying` reflètent la **réalité** et ne sont
+/// mis à jour que par P3 lorsqu'elle applique les actions (cf. le helper de test
+/// [`apply_collector`]). `collector_decide` ne fait que *lire* `carrying`.
+pub struct CollectorState {
+    /// Position courante du robot (mise à jour par P3 sur `MoveTo`).
+    pub pos: Position,
+    /// Quantité transportée (mise à jour par P3 : +1 sur `Collect`, 0 sur `Unload`).
+    pub carrying: u32,
+    /// Capacité maximale `K` avant de rentrer décharger.
+    pub capacity: u32,
+    /// Gisement connu actuellement visé — planification **privée**.
+    target: Option<Position>,
 }
 
 impl CollectorState {
-    /// Étiquette courte pour l'affichage (P4) et les snapshots (comm).
-    pub fn label(&self) -> &'static str {
-        match self {
-            CollectorState::Idle => "Idle",
-            CollectorState::MovingToTarget { .. } => "Moving",
-            CollectorState::Collecting { .. } => "Collecting",
-            CollectorState::ReturningToBase { .. } => "Returning",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Collecteur
-// ---------------------------------------------------------------------------
-
-/// Un robot collecteur.
-#[derive(Debug)]
-pub struct Collector {
-    pub id: usize,
-    pub pos: Position,
-    /// Unités déposées à la base (inventaire définitif).
-    pub deposited: u32,
-    pub state: CollectorState,
-}
-
-impl Collector {
-    pub fn new(id: usize, start: Position) -> Self {
-        Collector {
-            id,
+    /// Crée un collecteur à la position `start`, vide, de capacité `capacity`.
+    pub fn new(start: Position, capacity: u32) -> Self {
+        CollectorState {
             pos: start,
-            deposited: 0,
-            state: CollectorState::Idle,
+            carrying: 0,
+            capacity,
+            target: None,
         }
-    }
-
-    /// Avance d'un tick.
-    ///
-    /// `world` est utilisé pour le pathfinding (obstacles).
-    /// `kb` est la seule source de vérité sur les ressources visibles.
-    ///
-    /// Retourne `true` si quelque chose a changé (utile pour le rendu).
-    pub fn step(&mut self, world: &mut World, kb: &mut KnowledgeBase) -> bool {
-        match self.state.clone() {
-            CollectorState::Idle => self.tick_idle(world, kb),
-            CollectorState::MovingToTarget { target, path } => {
-                self.tick_moving(target, path, world, kb)
-            }
-            CollectorState::Collecting { target } => self.tick_collecting(target, world, kb),
-            CollectorState::ReturningToBase { units, path } => {
-                self.tick_returning(units, path, world)
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Transitions
-    // -----------------------------------------------------------------------
-
-    fn tick_idle(&mut self, _world: &World, kb: &KnowledgeBase) -> bool {
-        let Some(target) = nearest_resource(self.pos, kb) else {
-            return false; // rien à faire
-        };
-        let Some(path) = bfs(self.pos, target, _world) else {
-            return false; // cible inatteignable
-        };
-        self.state = CollectorState::MovingToTarget {
-            target,
-            path: path.into(),
-        };
-        true
-    }
-
-    fn tick_moving(
-        &mut self,
-        target: Position,
-        mut path: VecDeque<Position>,
-        world: &World,
-        kb: &KnowledgeBase,
-    ) -> bool {
-        // Si la ressource a disparu de la KB (épuisée par un autre robot) on abandonne.
-        if !kb.known_resources().contains_key(&target) {
-            self.state = CollectorState::Idle;
-            return true;
-        }
-        if let Some(next) = path.pop_front() {
-            self.pos = next;
-            if self.pos == target {
-                self.state = CollectorState::Collecting { target };
-            } else {
-                self.state = CollectorState::MovingToTarget { target, path };
-            }
-        } else {
-            // Chemin vide mais pas encore arrivé : recalcule.
-            self.state = CollectorState::Idle;
-        }
-        true
-    }
-
-    fn tick_collecting(
-        &mut self,
-        target: Position,
-        world: &mut World,
-        kb: &mut KnowledgeBase,
-    ) -> bool {
-        // On retire une unité de la vérité-terrain.
-        if let Some(resource) = world.resources.get_mut(&target) {
-            if resource.take_one() {
-                if resource.is_depleted() {
-                    world.resources.remove(&target);
-                    kb.remove(&target);
-                } else {
-                    // Met à jour la quantité connue dans la KB.
-                    kb.report_resource(target, *world.resources.get(&target).unwrap());
-                }
-                // Rentre à la base.
-                let path = bfs(self.pos, world.base, world).unwrap_or_default();
-                self.state = CollectorState::ReturningToBase {
-                    units: 1,
-                    path: path.into(),
-                };
-                return true;
-            }
-        }
-        // Ressource absente ou épuisée — nettoyage et retour en Idle.
-        kb.remove(&target);
-        self.state = CollectorState::Idle;
-        true
-    }
-
-    fn tick_returning(&mut self, units: u32, mut path: VecDeque<Position>, world: &World) -> bool {
-        if let Some(next) = path.pop_front() {
-            self.pos = next;
-            if self.pos == world.base {
-                self.deposited += units;
-                self.state = CollectorState::Idle;
-            } else {
-                self.state = CollectorState::ReturningToBase { units, path };
-            }
-        } else {
-            // Déjà à la base.
-            self.deposited += units;
-            self.state = CollectorState::Idle;
-        }
-        true
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Choisit la ressource connue la plus proche (distance de Manhattan).
-fn nearest_resource(from: Position, kb: &KnowledgeBase) -> Option<Position> {
-    kb.known_resources()
-        .keys()
-        .min_by_key(|&&pos| from.manhattan_distance(&pos))
-        .copied()
-}
-
-/// BFS — renvoie le chemin (sans la case de départ, avec l'arrivée).
-/// Renvoie `None` si `goal` est inaccessible.
-pub fn bfs(start: Position, goal: Position, world: &World) -> Option<Vec<Position>> {
-    if start == goal {
-        return Some(vec![]);
+/// Renvoie la **première case** à franchir depuis `from` pour rejoindre `goal`
+/// par le plus court chemin, ou `None` si `goal` est inatteignable.
+///
+/// BFS classique (file FIFO + ensemble visité + `came_from`), expansion via
+/// [`World::walkable_neighbors`] : il route donc sur les obstacles **vérité
+/// terrain**. L'ordre des voisins étant fixe, le chemin trouvé est déterministe.
+///
+/// Pré-condition : `from != goal` (l'appelant teste l'arrivée avant). Le but
+/// (case d'une ressource = `Tile::Empty`, ou base = `Tile::Base`) est supposé
+/// traversable, donc atteignable par `walkable_neighbors`.
+fn next_step_toward(world: &World, from: Position, goal: Position) -> Option<Position> {
+    if from == goal {
+        return None;
     }
 
-    let mut queue: VecDeque<Position> = VecDeque::new();
+    let mut visited: HashSet<Position> = HashSet::new();
     let mut came_from: HashMap<Position, Position> = HashMap::new();
-
-    queue.push_back(start);
-    came_from.insert(start, start);
+    let mut queue: VecDeque<Position> = VecDeque::new();
+    visited.insert(from);
+    queue.push_back(from);
 
     while let Some(current) = queue.pop_front() {
-        for neighbor in world.walkable_neighbors(current) {
-            if came_from.contains_key(&neighbor) {
-                continue;
+        if current == goal {
+            // Remonte la chaîne des prédécesseurs jusqu'à la case juste après
+            // `from` : c'est le premier pas à franchir.
+            let mut step = goal;
+            while came_from[&step] != from {
+                step = came_from[&step];
             }
-            came_from.insert(neighbor, current);
-            if neighbor == goal {
-                return Some(reconstruct(start, goal, &came_from));
+            return Some(step);
+        }
+        for next in world.walkable_neighbors(current) {
+            if visited.insert(next) {
+                came_from.insert(next, current);
+                queue.push_back(next);
             }
-            queue.push_back(neighbor);
         }
     }
+
     None
 }
 
-fn reconstruct(
-    start: Position,
-    goal: Position,
-    came_from: &HashMap<Position, Position>,
-) -> Vec<Position> {
-    let mut path = Vec::new();
-    let mut current = goal;
-    while current != start {
-        path.push(current);
-        current = came_from[&current];
-    }
-    path.reverse();
-    path
+/// Choisit, parmi les gisements connus, celui qui minimise
+/// `(distance_manhattan(from, p), p.x, p.y)`.
+///
+/// Le tie-break par coordonnées rend le choix **déterministe** malgré l'ordre
+/// non garanti d'une `HashMap`, ce qui évite toute oscillation de cible.
+fn choose_target(known: &HashMap<Position, Resource>, from: Position) -> Option<Position> {
+    known
+        .keys()
+        .copied()
+        .min_by_key(|p| (from.manhattan_distance(p), p.x, p.y))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+/// Achemine le collecteur vers la base pour décharger.
+///
+/// À la base → [`Action::Unload`] ; sinon un pas de BFS vers la base ; et, par
+/// défense (base murée — ne devrait pas arriver), [`Action::Idle`].
+fn go_unload(state: &CollectorState, world: &World) -> Action {
+    if state.pos == world.base {
+        Action::Unload
+    } else {
+        match next_step_toward(world, state.pos, world.base) {
+            Some(next) => Action::MoveTo(next),
+            None => Action::Idle,
+        }
+    }
+}
+
+/// Décide de l'**intention** d'un collecteur pour le tick courant.
+///
+/// Logique pure : ne mute que `state.target` (planification). Ne lit *jamais*
+/// `world.resources` (vérité terrain = triche) — les gisements connus arrivent
+/// via `known`, fourni en données brutes par P3. Le monde n'est lu que pour le
+/// terrain (cases traversables) et la base.
+///
+/// Phases :
+/// 1. **Plein** (`carrying >= capacity`) : rentrer décharger (cf. [`go_unload`]).
+/// 2. **Collecte** (`carrying < capacity`) :
+///    a. (re)cibler le gisement connu le plus proche si la cible courante est
+///    absente ou périmée (cf. [`choose_target`]) ;
+///    b. cible atteinte → [`Action::Collect`] ; sinon un pas de BFS vers elle ;
+///    cible derrière des murs (BFS `None`) → on l'abandonne ;
+///    c. aucune cible valide/atteignable : si l'on porte déjà quelque chose,
+///    repartir décharger, sinon [`Action::Idle`] (attendre les éclaireurs).
+pub fn collector_decide(
+    state: &mut CollectorState,
+    world: &World,
+    known: &HashMap<Position, Resource>,
+) -> Action {
+    // Phase 1 — plein : on rentre décharger.
+    if state.carrying >= state.capacity {
+        return go_unload(state, world);
+    }
+
+    // Phase 2a — valider la cible courante, en choisir une sinon.
+    let target_still_known = matches!(state.target, Some(t) if known.contains_key(&t));
+    if !target_still_known {
+        state.target = choose_target(known, state.pos);
+    }
+
+    // Phase 2b — viser la cible retenue.
+    if let Some(target) = state.target {
+        if state.pos == target {
+            return Action::Collect(target);
+        }
+        match next_step_toward(world, state.pos, target) {
+            Some(next) => return Action::MoveTo(next),
+            // Cible inatteignable (murée) : on l'abandonne, on retombe en 2c.
+            None => state.target = None,
+        }
+    }
+
+    // Phase 2c — rien à viser : décharger si l'on porte, sinon patienter.
+    if state.carrying > 0 {
+        go_unload(state, world)
+    } else {
+        Action::Idle
+    }
+}
+
+/// Helper **réservé aux tests** : applique une [`Action`] à un [`ScoutState`]
+/// pour simuler une séquence de décisions.
+///
+/// En production, c'est la Personne 3 qui applique les actions sur le monde
+/// partagé ; ce helper ne sert qu'à vérifier la reproductibilité d'une suite
+/// de décisions sans dépendre du code de P3.
+#[cfg(test)]
+fn apply(state: &mut ScoutState, action: Action) {
+    if let Action::MoveTo(next) = action {
+        state.pos = next;
+    }
+}
+
+/// Helper **réservé aux tests** : simule le rôle de P3 sur un [`CollectorState`]
+/// pour dérouler des cycles complets (déplacement / collecte / déchargement).
+///
+/// Ne modélise que l'effet sur l'état du robot — la vraie collecte (décrément
+/// du gisement, retrait s'il est épuisé) reste l'affaire de P3.
+#[cfg(test)]
+fn apply_collector(state: &mut CollectorState, action: Action) {
+    match action {
+        Action::MoveTo(next) => state.pos = next,
+        Action::Collect(_) => state.carrying = (state.carrying + 1).min(state.capacity),
+        Action::Unload => state.carrying = 0,
+        _ => {}
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{KnowledgeBase, Resource, ResourceKind, World};
+    use crate::types::{ResourceKind, Tile};
 
-    fn simple_world() -> World {
-        // 5x5, aucun obstacle, base au centre (2,2).
-        World::new(5, 5)
-    }
-
-    fn world_with_resource(pos: Position) -> (World, KnowledgeBase) {
-        let mut world = simple_world();
-        let resource = Resource::new(ResourceKind::Energy, 3);
-        world.resources.insert(pos, resource);
-        let mut kb = KnowledgeBase::new();
-        kb.report_resource(pos, resource);
-        (world, kb)
-    }
-
+    /// Sur une case portant une ressource → `Report` avec la bonne
+    /// position et la bonne ressource.
     #[test]
-    fn idle_sans_kb_ne_bouge_pas() {
-        let world = simple_world();
-        let mut kb = KnowledgeBase::new();
-        let mut robot = Collector::new(0, world.base);
-        let changed = robot.step(&mut { world }, &mut kb);
-        assert!(!changed);
-        assert_eq!(robot.state, CollectorState::Idle);
+    fn report_sur_ressource() {
+        let mut world = World::new(5, 5);
+        let pos = Position::new(1, 1);
+        let res = Resource::new(ResourceKind::Crystal, 7);
+        world.resources.insert(pos, res);
+
+        let mut scout = ScoutState::new(pos, 42);
+        assert_eq!(scout_decide(&mut scout, &world), Action::Report(pos, res));
     }
 
+    /// Sur une case sans ressource → `MoveTo` vers une case **adjacente** et
+    /// **traversable** (jamais un obstacle, jamais hors limites).
     #[test]
-    fn idle_avec_ressource_cible() {
-        let res_pos = Position::new(0, 0);
-        let (mut world, mut kb) = world_with_resource(res_pos);
-        let mut robot = Collector::new(0, world.base);
-        robot.step(&mut world, &mut kb);
-        assert!(matches!(
-            robot.state,
-            CollectorState::MovingToTarget { target, .. } if target == res_pos
-        ));
+    fn moveto_case_valide() {
+        let mut world = World::new(5, 5);
+        let pos = Position::new(2, 2);
+        // Mur d'obstacles autour sauf une ouverture : force le seul choix légal.
+        world.set_tile(Position::new(1, 2), Tile::Obstacle);
+        world.set_tile(Position::new(3, 2), Tile::Obstacle);
+        world.set_tile(Position::new(2, 1), Tile::Obstacle);
+        // (2, 3) reste libre.
+
+        let mut scout = ScoutState::new(pos, 1);
+        match scout_decide(&mut scout, &world) {
+            Action::MoveTo(next) => {
+                assert_eq!(next, Position::new(2, 3));
+                assert!(world.is_walkable(next), "doit être traversable");
+                assert_eq!(pos.manhattan_distance(&next), 1, "doit être adjacente");
+            }
+            other => panic!("attendu MoveTo, obtenu {other:?}"),
+        }
     }
 
+    /// Quelle que soit la graine, `MoveTo` ne vise qu'un voisin traversable.
     #[test]
-    fn collecte_complete_un_cycle() {
-        let res_pos = Position::new(2, 0); // même colonne que la base, juste au-dessus
-        let (mut world, mut kb) = world_with_resource(res_pos);
-        let mut robot = Collector::new(0, world.base);
+    fn moveto_jamais_obstacle_ni_hors_limites() {
+        let mut world = World::new(5, 5);
+        let pos = Position::new(2, 2);
+        world.set_tile(Position::new(1, 2), Tile::Obstacle);
 
-        // On fait tourner jusqu'à ce que le robot dépose (ou 50 ticks max).
-        for _ in 0..50 {
-            robot.step(&mut world, &mut kb);
-            if robot.deposited > 0 {
-                break;
+        for seed in 0..50 {
+            let mut scout = ScoutState::new(pos, seed);
+            if let Action::MoveTo(next) = scout_decide(&mut scout, &world) {
+                assert!(world.is_walkable(next));
+                assert!(world.in_bounds(next));
+                assert_eq!(pos.manhattan_distance(&next), 1);
             }
         }
-        assert!(robot.deposited > 0, "Le robot n'a rien déposé en 50 ticks");
     }
 
+    /// Éclaireur encerclé d'obstacles → `Idle`.
     #[test]
-    fn bfs_trouve_chemin_simple() {
-        let world = simple_world();
-        let path = bfs(Position::new(0, 0), Position::new(2, 2), &world);
-        assert!(path.is_some());
-        let path = path.unwrap();
-        assert_eq!(*path.last().unwrap(), Position::new(2, 2));
-    }
-
-    #[test]
-    fn bfs_meme_case_chemin_vide() {
-        let world = simple_world();
-        let path = bfs(Position::new(1, 1), Position::new(1, 1), &world);
-        assert_eq!(path, Some(vec![]));
-    }
-
-    #[test]
-    fn ressource_epuisee_retiree_de_la_kb() {
-        let res_pos = Position::new(2, 0);
-        let mut world = simple_world();
-        // Quantité = 1 : épuisée après une seule collecte.
-        let resource = Resource::new(ResourceKind::Energy, 1);
-        world.resources.insert(res_pos, resource);
-        let mut kb = KnowledgeBase::new();
-        kb.report_resource(res_pos, resource);
-
-        let mut robot = Collector::new(0, world.base);
-        for _ in 0..50 {
-            robot.step(&mut world, &mut kb);
-            if robot.deposited > 0 { break; }
+    fn idle_si_encercle() {
+        let mut world = World::new(5, 5);
+        let pos = Position::new(2, 2);
+        for n in pos.neighbors(world.width, world.height) {
+            world.set_tile(n, Tile::Obstacle);
         }
 
-        assert!(kb.is_empty(), "La KB doit être vide après épuisement");
-        assert!(world.resources.get(&res_pos).is_none());
+        let mut scout = ScoutState::new(pos, 99);
+        assert_eq!(scout_decide(&mut scout, &world), Action::Idle);
+    }
+
+    /// À graine fixe, une séquence de décisions est reproductible.
+    #[test]
+    fn sequence_reproductible() {
+        let world = World::new(8, 8);
+        let start = Position::new(4, 4);
+
+        let run = || {
+            let mut scout = ScoutState::new(start, 2024);
+            let mut actions = Vec::new();
+            for _ in 0..20 {
+                let action = scout_decide(&mut scout, &world);
+                apply(&mut scout, action);
+                actions.push(action);
+            }
+            actions
+        };
+
+        assert_eq!(run(), run(), "même graine ⇒ même séquence");
+    }
+
+    /// `scout_decide` ne mute jamais le monde (vue en lecture seule).
+    #[test]
+    fn ne_mute_pas_le_monde() {
+        let mut world = World::new(5, 5);
+        world
+            .resources
+            .insert(Position::new(0, 0), Resource::new(ResourceKind::Energy, 3));
+        let before = world.clone();
+
+        let mut scout = ScoutState::new(Position::new(2, 2), 7);
+        let _ = scout_decide(&mut scout, &world);
+
+        assert_eq!(world.tiles(), before.tiles());
+        assert_eq!(world.resources, before.resources);
+    }
+
+    // --- Collecteur (Sprint P2-2) -------------------------------------------
+
+    /// Construit une table de gisements connus à partir de couples
+    /// `(position, quantité)` (toujours du cristal, le `kind` n'importe pas ici).
+    fn known_from(pairs: &[(Position, u32)]) -> HashMap<Position, Resource> {
+        pairs
+            .iter()
+            .map(|&(p, q)| (p, Resource::new(ResourceKind::Crystal, q)))
+            .collect()
+    }
+
+    /// Chemin libre vers une cible proche : chaque décision est un `MoveTo` qui
+    /// rapproche, puis le collecteur ATTEINT la cible et renvoie `Collect`.
+    #[test]
+    fn seek_puis_collect() {
+        let world = World::new(7, 7);
+        let target = Position::new(5, 1);
+        let known = known_from(&[(target, 4)]);
+
+        let mut col = CollectorState::new(Position::new(1, 1), 10);
+        let mut last = Action::Idle;
+        for _ in 0..30 {
+            last = collector_decide(&mut col, &world, &known);
+            if last == Action::Collect(target) {
+                break;
+            }
+            match last {
+                Action::MoveTo(next) => {
+                    assert!(world.is_walkable(next));
+                    assert_eq!(col.pos.manhattan_distance(&next), 1);
+                }
+                other => panic!("attendu MoveTo en chemin, obtenu {other:?}"),
+            }
+            apply_collector(&mut col, last);
+        }
+        assert_eq!(last, Action::Collect(target));
+        assert_eq!(col.pos, target);
+    }
+
+    /// Déjà sur la cible → `Collect(cible)` immédiatement.
+    #[test]
+    fn collect_sur_la_cible() {
+        let world = World::new(5, 5);
+        let target = Position::new(2, 2);
+        let known = known_from(&[(target, 1)]);
+
+        let mut col = CollectorState::new(target, 10);
+        assert_eq!(
+            collector_decide(&mut col, &world, &known),
+            Action::Collect(target)
+        );
+    }
+
+    /// `carrying == capacity` → retour à la base, puis `Unload` une fois arrivé.
+    #[test]
+    fn plein_rentre_et_decharge() {
+        let world = World::new(7, 7);
+        let known = known_from(&[(Position::new(0, 0), 5)]);
+
+        let mut col = CollectorState::new(Position::new(1, 1), 3);
+        col.carrying = 3; // simule un robot plein (mutation côté P3)
+
+        let mut last = Action::Idle;
+        for _ in 0..40 {
+            last = collector_decide(&mut col, &world, &known);
+            if last == Action::Unload {
+                break;
+            }
+            match last {
+                Action::MoveTo(next) => assert!(world.is_walkable(next)),
+                other => panic!("attendu MoveTo vers la base, obtenu {other:?}"),
+            }
+            apply_collector(&mut col, last);
+        }
+        assert_eq!(last, Action::Unload);
+        assert_eq!(col.pos, world.base);
+    }
+
+    /// Un mur entre le collecteur et la cible : le BFS contourne. Chaque pas est
+    /// traversable et la suite atteint bien la cible.
+    #[test]
+    fn contourne_le_mur() {
+        let mut world = World::new(5, 5);
+        // Mur vertical en x=2 sur y = 0..=3, laissant un passage en (2, 4).
+        for y in 0..4 {
+            world.set_tile(Position::new(2, y), Tile::Obstacle);
+        }
+        let target = Position::new(4, 0);
+        let known = known_from(&[(target, 2)]);
+
+        let mut col = CollectorState::new(Position::new(0, 0), 10);
+        let mut reached = false;
+        for _ in 0..40 {
+            let action = collector_decide(&mut col, &world, &known);
+            if action == Action::Collect(target) {
+                reached = true;
+                break;
+            }
+            match action {
+                Action::MoveTo(next) => {
+                    assert!(world.is_walkable(next), "le BFS ne traverse pas un mur");
+                    assert_eq!(col.pos.manhattan_distance(&next), 1);
+                }
+                other => panic!("attendu MoveTo/Collect, obtenu {other:?}"),
+            }
+            apply_collector(&mut col, action);
+        }
+        assert!(
+            reached,
+            "le collecteur doit atteindre la cible en contournant"
+        );
+        assert_eq!(col.pos, target);
+    }
+
+    /// Cible périmée : on la retire de `known` → re-ciblage, jamais de `Collect`
+    /// sur la ressource disparue.
+    #[test]
+    fn re_cible_si_perimee() {
+        let world = World::new(7, 7);
+        let stale = Position::new(6, 6);
+        let fresh = Position::new(1, 0);
+
+        // Premier tick : la cible la plus proche est verrouillée.
+        let mut col = CollectorState::new(Position::new(0, 0), 10);
+        let known_before = known_from(&[(fresh, 2)]);
+        let first = collector_decide(&mut col, &world, &known_before);
+        assert!(matches!(first, Action::MoveTo(_) | Action::Collect(_)));
+
+        // La ressource `fresh` disparaît, seule `stale` reste connue.
+        let known_after = known_from(&[(stale, 2)]);
+        let mut saw_collect_on_fresh = false;
+        for _ in 0..40 {
+            let action = collector_decide(&mut col, &world, &known_after);
+            if action == Action::Collect(fresh) {
+                saw_collect_on_fresh = true;
+            }
+            if action == Action::Collect(stale) {
+                break;
+            }
+            apply_collector(&mut col, action);
+        }
+        assert!(
+            !saw_collect_on_fresh,
+            "ne doit pas collecter une cible disparue"
+        );
+        assert_eq!(
+            col.target,
+            Some(stale),
+            "doit s'être re-ciblé sur le gisement restant"
+        );
+    }
+
+    /// `known` vide et rien en soute → `Idle` (on attend les éclaireurs).
+    #[test]
+    fn idle_si_rien_a_faire() {
+        let world = World::new(5, 5);
+        let known: HashMap<Position, Resource> = HashMap::new();
+
+        let mut col = CollectorState::new(Position::new(1, 1), 10);
+        assert_eq!(collector_decide(&mut col, &world, &known), Action::Idle);
+    }
+
+    /// `known` vide mais soute non vide → repart décharger à la base.
+    #[test]
+    fn retour_decharge_si_porte_sans_cible() {
+        let world = World::new(7, 7);
+        let known: HashMap<Position, Resource> = HashMap::new();
+
+        let mut col = CollectorState::new(Position::new(1, 1), 10);
+        col.carrying = 2; // porte sans cible connue
+        match collector_decide(&mut col, &world, &known) {
+            Action::MoveTo(next) => {
+                assert!(world.is_walkable(next));
+                // Le pas rapproche de la base.
+                assert!(
+                    next.manhattan_distance(&world.base) < col.pos.manhattan_distance(&world.base)
+                );
+            }
+            other => panic!("attendu MoveTo vers la base, obtenu {other:?}"),
+        }
+    }
+
+    /// Deux ressources équidistantes → cible déterministe (tie-break stable),
+    /// reproductible sur plusieurs exécutions.
+    #[test]
+    fn cible_deterministe_si_equidistante() {
+        let world = World::new(7, 7);
+        let start = Position::new(3, 3);
+        // (1,3) et (5,3) sont toutes deux à distance 2 de (3,3).
+        let known = known_from(&[(Position::new(5, 3), 1), (Position::new(1, 3), 1)]);
+
+        let decide_once = || {
+            let mut col = CollectorState::new(start, 10);
+            let action = collector_decide(&mut col, &world, &known);
+            (action, col.target)
+        };
+        let first = decide_once();
+        for _ in 0..20 {
+            assert_eq!(decide_once(), first, "le choix de cible doit être stable");
+        }
+        // tie-break (dist, x, y) ⇒ (1,3) gagne sur (5,3).
+        assert_eq!(first.1, Some(Position::new(1, 3)));
+    }
+
+    /// Pureté : `collector_decide` ne mute jamais le monde.
+    #[test]
+    fn collecteur_ne_mute_pas_le_monde() {
+        let mut world = World::new(6, 6);
+        world
+            .resources
+            .insert(Position::new(0, 0), Resource::new(ResourceKind::Energy, 9));
+        let before = world.clone();
+        let known = known_from(&[(Position::new(4, 4), 3)]);
+
+        let mut col = CollectorState::new(Position::new(1, 1), 10);
+        let _ = collector_decide(&mut col, &world, &known);
+
+        assert_eq!(world.tiles(), before.tiles());
+        assert_eq!(world.resources, before.resources);
     }
 }
