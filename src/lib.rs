@@ -10,6 +10,8 @@
 //!   * `comm`    — channels & threads (Personne 3, à venir) ;
 //!   * `ui`      — rendu Ratatui (Personne 4, à venir).
 
+pub mod comm;
 pub mod map;
 pub mod robots;
+pub mod sim;
 pub mod types;
