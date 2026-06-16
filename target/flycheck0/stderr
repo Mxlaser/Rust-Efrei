@@ -1,0 +1,238 @@
+   0.013640166s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint: fingerprint error for resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("resource_collection_sim", ["lib"], "/Users/izanami/dev/efrei/rust2/src/lib.rs", Edition2021) }
+   0.013666291s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/resource_collection_sim-50b39d2fae0af0c2/lib-resource_collection_sim`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.017566666s  INFO prepare_target{force=false package_id=noise v0.9.0 target="noise"}: cargo::core::compiler::fingerprint: fingerprint error for noise v0.9.0/Check { test: false }/TargetInner { ..: lib_target("noise", ["lib"], "/Users/izanami/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/noise-0.9.0/src/lib.rs", Edition2018) }
+   0.017575041s  INFO prepare_target{force=false package_id=noise v0.9.0 target="noise"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/noise-35fb361ba8d626a8/lib-noise`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.018116541s  INFO prepare_target{force=false package_id=rand v0.8.6 target="rand"}: cargo::core::compiler::fingerprint: fingerprint error for rand v0.8.6/Check { test: false }/TargetInner { ..: lib_target("rand", ["lib"], "/Users/izanami/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand-0.8.6/src/lib.rs", Edition2018) }
+   0.018123041s  INFO prepare_target{force=false package_id=rand v0.8.6 target="rand"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/rand-5ee2200731410d32/lib-rand`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   9: cargo::ops::cargo_compile::compile_ws
+  10: cargo::ops::cargo_compile::compile_with_exec
+  11: cargo::ops::cargo_compile::compile
+  12: cargo::commands::check::exec
+  13: <cargo::cli::Exec>::exec
+  14: cargo::main
+  15: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  16: std::rt::lang_start::<()>::{closure#0}
+  17: std::rt::lang_start_internal
+  18: _main
+   0.018635875s  INFO prepare_target{force=false package_id=rand_chacha v0.3.1 target="rand_chacha"}: cargo::core::compiler::fingerprint: fingerprint error for rand_chacha v0.3.1/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("rand_chacha", ["lib"], "/Users/izanami/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rand_chacha-0.3.1/src/lib.rs", Edition2018) }
+   0.018642166s  INFO prepare_target{force=false package_id=rand_chacha v0.3.1 target="rand_chacha"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/rand_chacha-a0a5d0c8cd4770a5/lib-rand_chacha`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: cargo::core::compiler::compile
+   9: <cargo::core::compiler::build_runner::BuildRunner>::compile
+  10: cargo::ops::cargo_compile::compile_ws
+  11: cargo::ops::cargo_compile::compile_with_exec
+  12: cargo::ops::cargo_compile::compile
+  13: cargo::commands::check::exec
+  14: <cargo::cli::Exec>::exec
+  15: cargo::main
+  16: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  17: std::rt::lang_start::<()>::{closure#0}
+  18: std::rt::lang_start_internal
+  19: _main
+   0.018839083s  INFO prepare_target{force=false package_id=ppv-lite86 v0.2.21 target="ppv_lite86"}: cargo::core::compiler::fingerprint: fingerprint error for ppv-lite86 v0.2.21/Check { test: false }/TargetInner { ..: lib_target("ppv_lite86", ["lib"], "/Users/izanami/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ppv-lite86-0.2.21/src/lib.rs", Edition2021) }
+   0.018844291s  INFO prepare_target{force=false package_id=ppv-lite86 v0.2.21 target="ppv_lite86"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/ppv-lite86-cb6039eb8bf6fe4e/lib-ppv_lite86`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: cargo::core::compiler::compile
+   9: cargo::core::compiler::compile
+  10: <cargo::core::compiler::build_runner::BuildRunner>::compile
+  11: cargo::ops::cargo_compile::compile_ws
+  12: cargo::ops::cargo_compile::compile_with_exec
+  13: cargo::ops::cargo_compile::compile
+  14: cargo::commands::check::exec
+  15: <cargo::cli::Exec>::exec
+  16: cargo::main
+  17: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  18: std::rt::lang_start::<()>::{closure#0}
+  19: std::rt::lang_start_internal
+  20: _main
+   0.019011750s  INFO prepare_target{force=false package_id=zerocopy v0.8.52 target="zerocopy"}: cargo::core::compiler::fingerprint: fingerprint error for zerocopy v0.8.52/Check { test: false }/TargetInner { ..: lib_target("zerocopy", ["lib"], "/Users/izanami/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerocopy-0.8.52/src/lib.rs", Edition2021) }
+   0.019016875s  INFO prepare_target{force=false package_id=zerocopy v0.8.52 target="zerocopy"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/zerocopy-507449850088d419/lib-zerocopy`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: cargo::core::compiler::compile
+   8: cargo::core::compiler::compile
+   9: cargo::core::compiler::compile
+  10: cargo::core::compiler::compile
+  11: <cargo::core::compiler::build_runner::BuildRunner>::compile
+  12: cargo::ops::cargo_compile::compile_ws
+  13: cargo::ops::cargo_compile::compile_with_exec
+  14: cargo::ops::cargo_compile::compile
+  15: cargo::commands::check::exec
+  16: <cargo::cli::Exec>::exec
+  17: cargo::main
+  18: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  19: std::rt::lang_start::<()>::{closure#0}
+  20: std::rt::lang_start_internal
+  21: _main
+   0.019661291s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint: fingerprint error for resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("resource_collection_sim", ["lib"], "/Users/izanami/dev/efrei/rust2/src/lib.rs", Edition2021) }
+   0.019670750s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/resource_collection_sim-f2f080de12a90754/test-lib-resource_collection_sim`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.019892208s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint: fingerprint error for resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2)/Check { test: false }/TargetInner { name: "resource_collection_sim", doc: true, ..: with_path("/Users/izanami/dev/efrei/rust2/src/main.rs", Edition2021) }
+   0.019898166s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/resource_collection_sim-a59edcb45192c488/bin-resource_collection_sim`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.020151916s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint: fingerprint error for resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2)/Check { test: true }/TargetInner { name: "resource_collection_sim", doc: true, ..: with_path("/Users/izanami/dev/efrei/rust2/src/main.rs", Edition2021) }
+   0.020158916s  INFO prepare_target{force=false package_id=resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2) target="resource_collection_sim"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/izanami/dev/efrei/rust2/target/debug/.fingerprint/resource_collection_sim-d7846e04f2038767/test-bin-resource_collection_sim`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+    Checking zerocopy v0.8.52
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.6
+    Checking noise v0.9.0
+    Checking resource_collection_sim v0.1.0 (/Users/izanami/dev/efrei/rust2)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.37s

@@ -1,0 +1,19 @@
+[package]
+name = "resource_collection_sim"
+version = "0.1.0"
+edition = "2021"
+description = "Simulation de collecte de ressources par robots autonomes (EFREI - Projet Rust)"
+
+[dependencies]
+# Bruit de Perlin pour la génération procédurale des obstacles
+noise = "0.9"
+# Génération de nombres aléatoires (quantités de ressources, placement)
+rand = "0.8"
+
+# Dépendances qui seront ajoutées par les autres membres du groupe :
+#   ratatui   -> Personne 4 (UI)
+#   crossterm -> Personne 4 (entrées clavier / terminal)
+# Elles sont listées ici en commentaire pour information.
+
+[profile.release]
+opt-level = 3
