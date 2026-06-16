@@ -1,0 +1,17 @@
+target/
+**/*.rs.bk
+
+# Rust/Cargo
+.cargo/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*.log
+
+# macOS
+.DS_Store
+

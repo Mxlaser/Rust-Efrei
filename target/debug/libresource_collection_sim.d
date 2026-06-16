@@ -1,1 +1,0 @@
-/Users/izanami/dev/efrei/rust2/target/debug/libresource_collection_sim.rlib: /Users/izanami/dev/efrei/rust2/src/lib.rs /Users/izanami/dev/efrei/rust2/src/map.rs /Users/izanami/dev/efrei/rust2/src/types.rs
