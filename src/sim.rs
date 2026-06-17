@@ -22,7 +22,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::comm::RobotSnapshot;
+use crate::comm::{RobotKind, RobotSnapshot};
 use crate::robots::{collector_decide, scout_decide, Action, CollectorState, ScoutState};
 use crate::types::{KnowledgeBase, World};
 
@@ -157,6 +157,116 @@ impl Simulation {
         collector_handles.into_iter().map(|h| h.join().unwrap()).collect()
     }
 
+    /// Variante de [`run_scouts_and_collectors`] qui stream chaque tick via channel.
+    ///
+    /// Scouts : IDs `0..n_scouts`, symbole `'x'` (`RobotKind::Scout`).
+    /// Collecteurs : IDs `n_scouts..n_scouts+n_collectors`, symbole `'o'` (`RobotKind::Collector`).
+    ///
+    /// ## Usage (P4)
+    /// ```ignore
+    /// let (tx, rx) = std::sync::mpsc::channel::<RobotSnapshot>();
+    /// std::thread::spawn(move || sim.run_all_sending(2, 3, 42, 500_000, tx));
+    /// // boucle Ratatui :
+    /// while let Ok(snap) = rx.try_recv() {
+    ///     // snap.kind == RobotKind::Scout → affiche 'x'
+    ///     // snap.kind == RobotKind::Collector → affiche 'o'
+    ///     robots.insert(snap.id, snap);
+    /// }
+    /// ```
+    pub fn run_all_sending(
+        &self,
+        n_scouts: usize,
+        n_collectors: usize,
+        base_seed: u64,
+        max_ticks: usize,
+        tx: Sender<RobotSnapshot>,
+    ) -> Vec<u32> {
+        let base = self.world.lock().unwrap().base;
+        let scouts_remaining = Arc::new(AtomicUsize::new(n_scouts));
+
+        // --- Threads éclaireurs (IDs 0..n_scouts) ---
+        let scout_handles: Vec<_> = (0..n_scouts)
+            .map(|i| {
+                let world = Arc::clone(&self.world);
+                let kb = Arc::clone(&self.kb);
+                let scouts_remaining = Arc::clone(&scouts_remaining);
+                let tx = tx.clone();
+                let seed = base_seed + i as u64;
+
+                thread::spawn(move || {
+                    let mut state = ScoutState::new(base, seed);
+
+                    for _ in 0..max_ticks {
+                        let action = {
+                            let world = world.lock().unwrap();
+                            scout_decide(&mut state, &world)
+                        };
+                        match action {
+                            Action::MoveTo(p) => state.pos = p,
+                            Action::Report(p, res) => {
+                                kb.lock().unwrap().report_resource(p, res);
+                            }
+                            Action::Idle => {}
+                            _ => {}
+                        }
+                        let _ = tx.send(RobotSnapshot {
+                            id: i,
+                            kind: RobotKind::Scout,
+                            pos: state.pos,
+                            state_label: action_label(action),
+                            deposited: 0,
+                        });
+                    }
+                    scouts_remaining.fetch_sub(1, Ordering::Relaxed);
+                })
+            })
+            .collect();
+
+        // --- Threads collecteurs (IDs n_scouts..n_scouts+n_collectors) ---
+        let collector_handles: Vec<_> = (0..n_collectors)
+            .map(|i| {
+                let world = Arc::clone(&self.world);
+                let kb = Arc::clone(&self.kb);
+                let scouts_remaining = Arc::clone(&scouts_remaining);
+                let tx = tx.clone();
+                let id = n_scouts + i;
+
+                thread::spawn(move || {
+                    let mut state = CollectorState::new(base, 10);
+                    let mut deposited = 0u32;
+
+                    for _ in 0..max_ticks {
+                        let known = kb.lock().unwrap().known_resources().clone();
+                        let action = {
+                            let world = world.lock().unwrap();
+                            collector_decide(&mut state, &world, &known)
+                        };
+                        apply_collector_action(&mut state, &mut deposited, action, &world, &kb);
+                        let _ = tx.send(RobotSnapshot {
+                            id,
+                            kind: RobotKind::Collector,
+                            pos: state.pos,
+                            state_label: action_label(action),
+                            deposited,
+                        });
+                        if matches!(action, Action::Idle) && state.carrying == 0
+                            && scouts_remaining.load(Ordering::Relaxed) == 0
+                            && kb.lock().unwrap().is_empty()
+                        {
+                            break;
+                        }
+                    }
+                    deposited
+                })
+            })
+            .collect();
+
+        for h in scout_handles {
+            h.join().unwrap();
+        }
+        collector_handles.into_iter().map(|h| h.join().unwrap()).collect()
+    }
+
     // -----------------------------------------------------------------------
     // Collecteurs seuls (KB pré-remplie via discover_all)
     // -----------------------------------------------------------------------
@@ -212,6 +322,7 @@ impl Simulation {
                         if let Some(ref tx) = tx {
                             let _ = tx.send(RobotSnapshot {
                                 id,
+                                kind: RobotKind::Collector,
                                 pos: state.pos,
                                 state_label: action_label(action),
                                 deposited,
