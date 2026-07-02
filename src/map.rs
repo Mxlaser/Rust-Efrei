@@ -1,15 +1,3 @@
-//! Génération procédurale de la carte.
-//!
-//! Responsabilités (Personne 1) :
-//!   * générer les obstacles à partir d'un **bruit de Perlin** ;
-//!   * placer la base centrale ;
-//!   * disperser les ressources (énergie / cristaux) avec des quantités
-//!     aléatoires (50–200 unités), sur des cases libres.
-//!
-//! La génération est **déterministe pour une graine (`seed`) donnée**, ce qui
-//! facilite le débogage et les tests : deux appels avec la même graine
-//! produisent exactement la même carte.
-
 use crate::types::{Position, Resource, ResourceKind, Tile, World};
 use noise::{NoiseFn, Perlin};
 use rand::rngs::StdRng;
@@ -56,13 +44,6 @@ const RESOURCE_MIN: u32 = 50;
 /// Quantité maximale d'une ressource (incluse).
 const RESOURCE_MAX: u32 = 200;
 
-/// Génère un monde complet à partir d'une configuration.
-///
-/// Étapes :
-///   1. création d'un monde vide avec base centrale ;
-///   2. pose des obstacles via le bruit de Perlin ;
-///   3. dégagement d'une zone autour de la base ;
-///   4. placement aléatoire des ressources sur des cases libres.
 pub fn generate(config: MapConfig) -> World {
     let mut world = World::new(config.width, config.height);
     let mut rng = StdRng::seed_from_u64(config.seed as u64);
