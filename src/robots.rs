@@ -1,29 +1,8 @@
-//! Comportements des robots : logique de décision **pure**.
-//!
-//! Ce module appartient à la **Personne 2** (comportements). Sa règle d'or :
-//! une fonction `*_decide` est de la **logique pure**. Elle reçoit l'état du
-//! robot (mutable, p. ex. pour faire avancer son générateur aléatoire) et une
-//! **vue en lecture** du monde ([`World`]), puis renvoie une **intention**
-//! ([`Action`]). Elle ne crée *aucun* thread, ne prend *aucun* lock, n'envoie
-//! sur *aucun* channel, ne fait *aucun* `sleep` et ne mute *jamais* le monde.
-//!
-//! C'est la **Personne 3** (threads & communication) qui exécutera ces
-//! décisions dans des threads et **appliquera** réellement les [`Action`] sur
-//! le monde partagé. Le contrat est donc strict : *décider* (P2) et *appliquer*
-//! (P3) sont deux étapes séparées.
-
 use crate::types::{Position, Resource, World};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// Intention produite par un robot pour un tick de simulation.
-///
-/// C'est le **vocabulaire partagé** entre la décision (Personne 2) et son
-/// application (Personne 3). Il est volontairement **complet et figé** : il
-/// couvre les besoins de l'éclaireur *et* du collecteur, même si certaines
-/// variantes ne seront branchées qu'au Sprint 2. P3 fera un `match` exhaustif
-/// dessus pour faire évoluer le monde.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// Se déplacer vers une case **adjacente** et traversable.
@@ -62,22 +41,6 @@ impl ScoutState {
     }
 }
 
-/// Décide de l'**intention** d'un éclaireur pour le tick courant.
-///
-/// Logique pure : aucune mutation du monde, aucun effet de bord hormis
-/// l'avancée du PRNG porté par `state`.
-///
-/// Priorités :
-/// 1. Si une ressource se trouve sur la case courante, la signaler via
-///    [`Action::Report`].
-/// 2. Sinon, choisir au hasard une case **traversable et adjacente** et
-///    renvoyer [`Action::MoveTo`].
-/// 3. Si aucun voisin n'est traversable (robot encerclé), renvoyer
-///    [`Action::Idle`].
-///
-/// Cette fonction **ne déplace pas** le robot : elle renvoie seulement
-/// l'intention. C'est P3 qui, en appliquant l'`Action`, mettra à jour la
-/// position (cf. le helper de test [`apply`]).
 pub fn scout_decide(state: &mut ScoutState, world: &World) -> Action {
     if let Some(&resource) = world.resource_at(state.pos) {
         return Action::Report(state.pos, resource);
@@ -92,17 +55,6 @@ pub fn scout_decide(state: &mut ScoutState, world: &World) -> Action {
     Action::MoveTo(neighbors[choice])
 }
 
-/// État propre à un robot **collecteur**.
-///
-/// Le collecteur se rend sur les gisements **connus** (signalés par les
-/// éclaireurs, transmis par P3 en données brutes), y ramasse des ressources une
-/// unité par tick jusqu'à atteindre sa [`capacity`](CollectorState::capacity),
-/// puis rentre décharger à la base.
-///
-/// Contrat de mutation : seul `collector_decide` écrit `target` (planification
-/// interne). Les champs `pos` et `carrying` reflètent la **réalité** et ne sont
-/// mis à jour que par P3 lorsqu'elle applique les actions (cf. le helper de test
-/// [`apply_collector`]). `collector_decide` ne fait que *lire* `carrying`.
 pub struct CollectorState {
     /// Position courante du robot (mise à jour par P3 sur `MoveTo`).
     pub pos: Position,
@@ -195,22 +147,6 @@ fn go_unload(state: &CollectorState, world: &World) -> Action {
     }
 }
 
-/// Décide de l'**intention** d'un collecteur pour le tick courant.
-///
-/// Logique pure : ne mute que `state.target` (planification). Ne lit *jamais*
-/// `world.resources` (vérité terrain = triche) — les gisements connus arrivent
-/// via `known`, fourni en données brutes par P3. Le monde n'est lu que pour le
-/// terrain (cases traversables) et la base.
-///
-/// Phases :
-/// 1. **Plein** (`carrying >= capacity`) : rentrer décharger (cf. [`go_unload`]).
-/// 2. **Collecte** (`carrying < capacity`) :
-///    a. (re)cibler le gisement connu le plus proche si la cible courante est
-///    absente ou périmée (cf. [`choose_target`]) ;
-///    b. cible atteinte → [`Action::Collect`] ; sinon un pas de BFS vers elle ;
-///    cible derrière des murs (BFS `None`) → on l'abandonne ;
-///    c. aucune cible valide/atteignable : si l'on porte déjà quelque chose,
-///    repartir décharger, sinon [`Action::Idle`] (attendre les éclaireurs).
 pub fn collector_decide(
     state: &mut CollectorState,
     world: &World,
@@ -247,12 +183,6 @@ pub fn collector_decide(
     }
 }
 
-/// Helper **réservé aux tests** : applique une [`Action`] à un [`ScoutState`]
-/// pour simuler une séquence de décisions.
-///
-/// En production, c'est la Personne 3 qui applique les actions sur le monde
-/// partagé ; ce helper ne sert qu'à vérifier la reproductibilité d'une suite
-/// de décisions sans dépendre du code de P3.
 #[cfg(test)]
 fn apply(state: &mut ScoutState, action: Action) {
     if let Action::MoveTo(next) = action {
@@ -260,11 +190,6 @@ fn apply(state: &mut ScoutState, action: Action) {
     }
 }
 
-/// Helper **réservé aux tests** : simule le rôle de P3 sur un [`CollectorState`]
-/// pour dérouler des cycles complets (déplacement / collecte / déchargement).
-///
-/// Ne modélise que l'effet sur l'état du robot — la vraie collecte (décrément
-/// du gisement, retrait s'il est épuisé) reste l'affaire de P3.
 #[cfg(test)]
 fn apply_collector(state: &mut CollectorState, action: Action) {
     match action {
@@ -382,8 +307,6 @@ mod tests {
         assert_eq!(world.resources, before.resources);
     }
 
-    // --- Collecteur (Sprint P2-2) -------------------------------------------
-
     /// Construit une table de gisements connus à partir de couples
     /// `(position, quantité)` (toujours du cristal, le `kind` n'importe pas ici).
     fn known_from(pairs: &[(Position, u32)]) -> HashMap<Position, Resource> {
@@ -442,7 +365,7 @@ mod tests {
         let known = known_from(&[(Position::new(0, 0), 5)]);
 
         let mut col = CollectorState::new(Position::new(1, 1), 3);
-        col.carrying = 3; // simule un robot plein (mutation côté P3)
+        col.carrying = 3;
 
         let mut last = Action::Idle;
         for _ in 0..40 {
