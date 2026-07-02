@@ -1,13 +1,3 @@
-//! Structures et énumérations partagées par tout le projet.
-//!
-//! Ce module constitue la **fondation** de la simulation : il définit les
-//! types de données manipulés par tous les autres modules (carte, robots,
-//! communication, UI). Il ne contient *aucune* logique métier — uniquement
-//! les types et quelques utilitaires de base — afin que chaque membre du
-//! groupe puisse travailler sur ces types sans dépendre du reste du code.
-//!
-//! Auteur : Personne 1 (Carte & structures de données).
-
 use std::collections::HashMap;
 
 /// Position d'une case sur la grille de la carte.
@@ -83,11 +73,6 @@ impl ResourceKind {
     }
 }
 
-/// Un gisement de ressource posé sur une case.
-///
-/// La `quantity` est mutable : les robots collecteurs (Personne 2/3) la
-/// décrémentent une unité à la fois. Quand elle atteint 0, le gisement est
-/// considéré comme épuisé (voir [`Resource::is_depleted`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resource {
     pub kind: ResourceKind,
@@ -119,12 +104,6 @@ impl Resource {
     }
 }
 
-/// Nature « statique » d'une case de la carte.
-///
-/// Les ressources ne sont **pas** stockées dans la grille de tuiles mais
-/// dans [`World::resources`] : elles peuvent en effet apparaître/disparaître
-/// (épuisement) et possèdent une quantité, contrairement au terrain qui ne
-/// change pas. Une case portant une ressource a la tuile [`Tile::Empty`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tile {
     /// Case libre, traversable.
@@ -142,12 +121,6 @@ impl Tile {
     }
 }
 
-/// Ce que les robots ont découvert collectivement — le seul état visible par
-/// les collecteurs et les éclaireurs. Distinct de [`World::resources`] qui est
-/// la vérité-terrain, invisible aux robots.
-///
-/// En phase concurrente (Personne 3), cette structure est enveloppée dans un
-/// `Arc<Mutex<KnowledgeBase>>` partagé entre tous les threads de robots.
 #[derive(Debug, Clone, Default)]
 pub struct KnowledgeBase {
     known_resources: HashMap<Position, Resource>,
@@ -180,11 +153,6 @@ impl KnowledgeBase {
     }
 }
 
-/// Le monde de la simulation : la carte et tout ce qu'elle contient.
-///
-/// C'est la structure centrale partagée. En phase concurrente (Personne 3),
-/// elle sera encapsulée dans un `Arc<Mutex<World>>` pour être lue/écrite par
-/// plusieurs threads sans course de données.
 #[derive(Debug, Clone)]
 pub struct World {
     /// Largeur de la carte (nombre de colonnes).
