@@ -1,9 +1,3 @@
-//! Interface terminal Ratatui — Personne 4.
-//!
-//! Assemble tout le projet : lance la simulation (Personne 3) dans un thread
-//! séparé, reçoit les positions des robots via un channel `mpsc`, lit la carte
-//! et les ressources via les handles partagés, et dessine le tout en temps réel.
-//!
 //! Touche : n'importe quelle touche quitte la simulation.
 
 use std::collections::HashMap;
