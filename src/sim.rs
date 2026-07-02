@@ -1,22 +1,3 @@
-//! Couche de concurrence — Personne 3.
-//!
-//! [`Simulation`] enveloppe le monde et la KB dans des `Arc<Mutex<>>` puis
-//! applique les décisions de P2 dans des threads dédiés.
-//!
-//! ## Contrat d'application des actions (wiring P2 → P3)
-//!
-//! | Action             | Ce que P3 fait                                               |
-//! |--------------------|--------------------------------------------------------------|
-//! | `MoveTo(p)`        | `state.pos = p`                                              |
-//! | `Collect(p)`       | `take_one()` sur world ; `carrying += 1` ; retire KB si épuisé |
-//! | `Unload`           | `deposited += carrying ; carrying = 0`                       |
-//! | `Report(p, res)`   | `kb.report_resource(p, res)`                                 |
-//! | `Idle`             | rien                                                         |
-//!
-//! ## Ordre d'acquisition des verrous
-//!
-//! Toujours **`world` en premier, `kb` en second** — dans tout le code.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -43,12 +24,12 @@ impl Simulation {
         }
     }
 
-    /// Handle clonable vers le monde — à passer à P4 pour le rendu.
+    /// Handle clonable vers le monde
     pub fn world_handle(&self) -> Arc<Mutex<World>> {
         Arc::clone(&self.world)
     }
 
-    /// Handle clonable vers la KnowledgeBase — à passer à P2 pour les scouts.
+    /// Handle clonable vers la KnowledgeBase
     pub fn kb_handle(&self) -> Arc<Mutex<KnowledgeBase>> {
         Arc::clone(&self.kb)
     }
@@ -67,12 +48,6 @@ impl Simulation {
     // Simulation complète : scouts + collecteurs
     // -----------------------------------------------------------------------
 
-    /// Lance `n_scouts` éclaireurs et `n_collectors` collecteurs en parallèle.
-    ///
-    /// Chaque scout reçoit la graine `base_seed + index` pour que leurs
-    /// marches aléatoires soient indépendantes.
-    ///
-    /// Retourne le vecteur des unités déposées à la base par chaque collecteur.
     pub fn run_scouts_and_collectors(
         &self,
         n_scouts: usize,
@@ -157,22 +132,6 @@ impl Simulation {
         collector_handles.into_iter().map(|h| h.join().unwrap()).collect()
     }
 
-    /// Variante de [`run_scouts_and_collectors`] qui stream chaque tick via channel.
-    ///
-    /// Scouts : IDs `0..n_scouts`, symbole `'x'` (`RobotKind::Scout`).
-    /// Collecteurs : IDs `n_scouts..n_scouts+n_collectors`, symbole `'o'` (`RobotKind::Collector`).
-    ///
-    /// ## Usage (P4)
-    /// ```ignore
-    /// let (tx, rx) = std::sync::mpsc::channel::<RobotSnapshot>();
-    /// std::thread::spawn(move || sim.run_all_sending(2, 3, 42, 500_000, tx));
-    /// // boucle Ratatui :
-    /// while let Ok(snap) = rx.try_recv() {
-    ///     // snap.kind == RobotKind::Scout → affiche 'x'
-    ///     // snap.kind == RobotKind::Collector → affiche 'o'
-    ///     robots.insert(snap.id, snap);
-    /// }
-    /// ```
     pub fn run_all_sending(
         &self,
         n_scouts: usize,
@@ -184,7 +143,7 @@ impl Simulation {
         let base = self.world.lock().unwrap().base;
         let scouts_remaining = Arc::new(AtomicUsize::new(n_scouts));
 
-        // --- Threads éclaireurs (IDs 0..n_scouts) ---
+        // --- Threads éclaireurs ---
         let scout_handles: Vec<_> = (0..n_scouts)
             .map(|i| {
                 let world = Arc::clone(&self.world);
@@ -222,7 +181,7 @@ impl Simulation {
             })
             .collect();
 
-        // --- Threads collecteurs (IDs n_scouts..n_scouts+n_collectors) ---
+        // --- Threads collecteurs ---
         let collector_handles: Vec<_> = (0..n_collectors)
             .map(|i| {
                 let world = Arc::clone(&self.world);
@@ -268,7 +227,7 @@ impl Simulation {
     }
 
     // -----------------------------------------------------------------------
-    // Collecteurs seuls (KB pré-remplie via discover_all)
+    // Collecteurs seuls
     // -----------------------------------------------------------------------
 
     /// Lance `n_collectors` collecteurs avec la KB déjà remplie.
@@ -277,20 +236,6 @@ impl Simulation {
         self.run_sending(n_collectors, max_ticks, None)
     }
 
-    /// Variante de [`run`] qui envoie un [`RobotSnapshot`] après chaque tick.
-    ///
-    /// P4 passe un `Sender` issu d'un `mpsc::channel()` et lit les snapshots
-    /// dans sa boucle de rendu avec `rx.try_recv()`.
-    ///
-    /// ## Usage (P4)
-    /// ```ignore
-    /// let (tx, rx) = std::sync::mpsc::channel::<RobotSnapshot>();
-    /// std::thread::spawn(move || sim.run_sending(3, 200_000, Some(tx)));
-    /// // boucle Ratatui :
-    /// while let Ok(snap) = rx.try_recv() {
-    ///     robot_states.insert(snap.id, snap);
-    /// }
-    /// ```
     pub fn run_sending(
         &self,
         n_collectors: usize,
