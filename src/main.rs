@@ -25,11 +25,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use resource_collection_sim::comm::RobotSnapshot;
+use resource_collection_sim::comm::{RobotKind, RobotSnapshot};
 use resource_collection_sim::map::{self, MapConfig};
 use resource_collection_sim::sim::Simulation;
 use resource_collection_sim::types::{Position, ResourceKind, Tile, World};
 
+/// Nombre d'éclaireurs lancés par la simulation.
+const N_SCOUTS: usize = 2;
 /// Nombre de collecteurs lancés par la simulation.
 const N_COLLECTORS: usize = 3;
 /// Nombre maximum de ticks de simulation.
@@ -50,18 +52,16 @@ fn main() -> io::Result<()> {
 
     let sim = Simulation::new(world);
 
-    // Les éclaireurs ne sont pas lancés par `run_sending` : on peuple donc la
-    // base de connaissances directement, sinon les collecteurs n'ont aucune
-    // ressource connue à viser et la simulation s'arrête aussitôt.
-    sim.discover_all();
-
     // Handles partagés pour lire le décor (terrain + ressources) au rendu.
     let world_handle = sim.world_handle();
 
     // --- 2. Lancer la simulation dans un thread séparé ---------------------
+    // run_all_sending lance les éclaireurs (IDs 0..N_SCOUTS) ET les collecteurs
+    // (IDs N_SCOUTS..) : les scouts peuplent eux-mêmes la KB en explorant
+    // (vrai fog-of-war), plus besoin de discover_all().
     let (tx, rx) = mpsc::channel::<RobotSnapshot>();
     let sim_thread = thread::spawn(move || {
-        sim.run_sending(N_COLLECTORS, MAX_TICKS, Some(tx));
+        sim.run_all_sending(N_SCOUTS, N_COLLECTORS, 42, MAX_TICKS, tx);
     });
 
     // --- 3. Préparer le terminal Ratatui -----------------------------------
@@ -131,9 +131,9 @@ fn ui(f: &mut Frame, world: &World, robots: &HashMap<usize, RobotSnapshot>, tota
 
 /// Rendu de la grille avec le codage couleur exact demandé par le sujet.
 fn draw_map(f: &mut Frame, area: Rect, world: &World, robots: &HashMap<usize, RobotSnapshot>) {
-    // Positions occupées par un robot collecteur (affiché 'o' magenta).
-    let robot_cells: HashMap<Position, ()> =
-        robots.values().map(|r| (r.pos, ())).collect();
+    // Positions occupées par un robot, avec son type (éclaireur 'x' / collecteur 'o').
+    let robot_cells: HashMap<Position, RobotKind> =
+        robots.values().map(|r| (r.pos, r.kind)).collect();
 
     let mut lines: Vec<Line> = Vec::with_capacity(world.height);
 
@@ -143,8 +143,11 @@ fn draw_map(f: &mut Frame, area: Rect, world: &World, robots: &HashMap<usize, Ro
             let pos = Position::new(x, y);
 
             // Priorité d'affichage : robot > ressource > terrain.
-            let (ch, color) = if robot_cells.contains_key(&pos) {
-                ('o', Color::Magenta) // Collecteur
+            let (ch, color) = if let Some(kind) = robot_cells.get(&pos) {
+                match kind {
+                    RobotKind::Scout => ('x', Color::Red),         // Éclaireur
+                    RobotKind::Collector => ('o', Color::Magenta), // Collecteur
+                }
             } else if let Some(res) = world.resource_at(pos) {
                 match res.kind {
                     ResourceKind::Energy => ('E', Color::Green),
@@ -202,9 +205,13 @@ fn draw_sidebar(
     ids.sort();
     for id in ids {
         let r = &robots[id];
+        let tag = match r.kind {
+            RobotKind::Scout => "x",
+            RobotKind::Collector => "o",
+        };
         lines.push(Line::from(format!(
-            "  #{} {} ({},{}) d:{}",
-            r.id, r.state_label, r.pos.x, r.pos.y, r.deposited
+            "  {} #{} {} ({},{}) d:{}",
+            tag, r.id, r.state_label, r.pos.x, r.pos.y, r.deposited
         )));
     }
 
